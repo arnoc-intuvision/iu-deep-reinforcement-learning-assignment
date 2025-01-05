@@ -22,10 +22,18 @@ class EnvState:
     solar_ctlr_setpoint: float
     grid_import_energy: float
 
-    def get_solar_vs_load_ratio(self):
+    def get_solar_vs_load_ratio(self) -> float:
 
         return np.round((self.solar_prod_energy / self.site_load_energy) * 100, 2)
+
+    def get_grid_surplus_energy(self, notified_maximum_demand: float) -> float:
+
+        return np.round(notified_maximum_demand - self.grid_import_energy, 2)
+
+    def get_solar_surplus_energy(self) -> float:
         
+        return np.round( (self.solar_prod_energy / (self.solar_ctlr_setpoint / 100)) - self.solar_prod_energy, 2)
+
 
 class MicrogridEnv:
 
@@ -35,19 +43,23 @@ class MicrogridEnv:
       self.step_idx = 0
       self.reward = 0.0
       self.discount_factor = 0.99
-      self.grid_maximum_notified_demand = 2000.0
+      self.grid_notified_maximum_demand = 2000.0
       self.bess_capacity = 3000.0
       self.bess_avail_discharge_energy = self.bess_capacity
       self.bess_step_size = [1500.0, 1000.0, 500.0, 0.0, 500.0, 1000.0, 1500.0]
       self.action_space = {0: 'charge-1500', 1: 'charge-1000', 2: 'charge-500', 3: 'do-nothing', 4: 'discharge-500', 5: 'discharge-1000', 6: 'discharge-1500'} 
       self.done = False
+      self.tou_offpeak_tariff = 1.0
+      self.tou_standard_tariff = 2.0
+      self.tou_peak_tariff = 5.0
+      self.solar_ppa_tariff = 1.4
       self.display_data_info()
 
   def display_data_info(self):
 
       print("Environment Defaults: ")
       print(f"""
-      Grid Notified Maximum Demand: {self.grid_maximum_notified_demand} kVA
+      Grid Notified Maximum Demand: {self.grid_notified_maximum_demand} kVA
       BESS Capacity: {self.bess_capacity} kWh
       BESS Actions: {', '.join( list( self.action_space.values() ) )}
       Reward Discount Factor: {self.discount_factor}
@@ -117,63 +129,123 @@ class MicrogridEnv:
 
   def bess_charge_step(self, state: EnvState, action: int) -> float:
 
-      final_charge_step_size = 0.0
-      adjusted_charge_step_size = 0.0
-      bess_step_size = self.bess_step_size[action]
+      charge_step_size = self.bess_step_size[action]
+
+      grid_surplus_energy = state.get_grid_surplus_energy(notified_maximum_demand=self.grid_notified_maximum_demand)
+      solar_surplus_energy = state.get_solar_surplus_energy()
       
-      if (state.grid_import_energy + bess_step_size) > self.grid_maximum_notified_demand:
+      required_charge_from_grid_import_energy = charge_step_size - solar_surplus_energy
+
+      charge_from_solar_energy = 0.0
+      charge_from_grid_import_energy = 0.0
+
+      # Determine the possible bess charge energy split between solar and grid
+      if (required_charge_from_grid_import_energy > 0) and (grid_surplus_energy > required_charge_from_grid_import_energy):
           
-          adjusted_charge_step_size = (self.grid_maximum_notified_demand - state.grid_import_energy)
+          charge_from_grid_import_energy = required_charge_from_grid_import_energy
+          charge_from_solar_energy = solar_surplus_energy
+
+      elif (required_charge_from_grid_import_energy > 0) and (grid_surplus_energy < required_charge_from_grid_import_energy):
+
+          charge_from_grid_import_energy = grid_surplus_energy
+          charge_from_solar_energy = solar_surplus_energy
 
       else:
 
-          adjusted_charge_step_size = bess_step_size
+          charge_from_grid_import_energy = 0.0
+          charge_from_solar_energy = charge_step_size
 
-      # 2800 + 500 = 3300 > 3000 = true
+      adjusted_charge_step_size = charge_from_solar_energy + charge_from_grid_import_energy
+      charge_from_solar_prop = 1.0 if charge_from_grid_import_energy == 0.0 else (charge_from_solar_energy / adjusted_charge_step_size)
+      charge_from_grid_import_prop = 1.0 - charge_from_solar_prop
+
+      final_charge_step_size = adjusted_charge_step_size
+      final_charge_from_solar_energy = charge_from_grid_import_energy
+      final_charge_from_grid_import_energy = charge_from_solar_energy
+
+      # Apply the bess charge energy to the battery storage, and adjust for over charging condition
       if (self.bess_avail_discharge_energy + adjusted_charge_step_size) > self.bess_capacity:
 
-          surplus_energy = (self.bess_avail_discharge_energy + adjusted_charge_step_size) - self.bess_capacity
+          surplus_charge_energy = (self.bess_avail_discharge_energy + adjusted_charge_step_size) - self.bess_capacity
 
-          final_charge_step_size = adjusted_charge_step_size - surplus_energy
+          final_charge_step_size = adjusted_charge_step_size - surplus_charge_energy
+          final_charge_from_solar_energy = final_charge_step_size * charge_from_solar_prop
+          final_charge_from_grid_import_energy = final_charge_step_size * charge_from_grid_import_prop
 
+          # BESS fully charged
           self.bess_avail_discharge_energy = self.bess_capacity
 
       else:
 
-          final_charge_step_size = adjusted_charge_step_size
-
+          # BESS busy charging
           self.bess_avail_discharge_energy += final_charge_step_size
 
-      return -1*final_charge_step_size
-      
+      # Calculate the total cost for charging from solar and grid energy sources
+      charge_from_grid_cost = 0.0
+      charge_from_solar_cost = final_charge_from_solar_energy * self.solar_ppa_tariff
+
+      if state.tou_peak == 1:
+          
+          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_peak_tariff
+
+      elif state.tou_standard == 1:
+          
+          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_standard_tariff
+          
+      elif state.tou_offpeak == 1:
+          
+          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_offpeak_tariff
+
+      return (charge_from_solar_cost + charge_from_grid_cost) / 1000.0
+
   def bess_discharge_step(self, state: EnvState, action: int) -> float:
 
-      final_discharge_step_size = 0.0
+      discharge_step_size = self.bess_step_size[action]
+
       adjusted_discharge_step_size = 0.0
-      bess_step_size = self.bess_step_size[action]
-      
-      if (state.grid_import_energy - bess_step_size) < 0.0:
+
+      # Determine the possible discharge energy from the grid import energy
+      if (state.grid_import_energy - discharge_step_size) < 0.0:
           
           adjusted_discharge_step_size = state.grid_import_energy
           
       else:
           
-          adjusted_discharge_step_size = bess_step_size 
+          adjusted_discharge_step_size = discharge_step_size 
           
-      # 300 - 500 = -200 < 0.0 = true
+      final_discharge_step_size = 0.0
+
+      # Apply the bess discharge energy to the battery storage, and adjust for over discharging condition
       if (self.bess_avail_discharge_energy - adjusted_discharge_step_size) < 0.0:
 
           final_discharge_step_size = self.bess_avail_discharge_energy
-          
+
+          # BESS fully discharged
           self.bess_avail_discharge_energy = 0.0
 
       else:
 
           final_discharge_step_size = adjusted_discharge_step_size
 
+          # BESS busy discharging
           self.bess_avail_discharge_energy -= final_discharge_step_size
 
-      return final_discharge_step_size
+      # Calculate the total cost saving for discharging the battery storage into the load
+      discharge_into_load_cost_saving = 0.0
+      
+      if state.tou_peak == 1:
+          
+          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_peak_tariff
+
+      elif state.tou_standard == 1:
+          
+          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_standard_tariff
+          
+      elif state.tou_offpeak == 1:
+          
+          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_offpeak_tariff
+
+      return discharge_into_load_cost_saving / 1000.0
 
   def calculate_reward(self, state: EnvState, action: int) -> float:
 
@@ -181,62 +253,20 @@ class MicrogridEnv:
       is_charge_action = re.match(r"^charge.*", bess_action) is not None
       is_discharge_action = re.match(r"^discharge.*", bess_action) is not None
 
-      # This tariff values are in ZAR currency
-      tou_offpeak_tariff = 1.0
-      tou_standard_tariff = 2.0
-      tou_peak_tariff = 5.0
-      solar_ppa_tariff = 1.4
-
-      bess_step_energy = None
-
-      # Apply selected action to BESS system
+      # Apply the selected charge/discharge action to battery storage
       if is_charge_action: 
 
-          bess_step_energy = self.bess_charge_step(state=self.state, action=action)
+          # Reward is negative, because charging the battery is a cost
+          self.reward = -1 * self.bess_charge_step(state=self.state, action=action)
 
       elif is_discharge_action:
 
-          bess_step_energy = self.bess_discharge_step(state=self.state, action=action)
+          # Reward is positive, because discharging the battery is a saving
+          self.reward = self.bess_discharge_step(state=self.state, action=action)
 
       else: # do-nothing
 
-          bess_step_energy = 0.0
-          
-
-      monetary_saving = 0.0
-
-      # Calculate the reward that resulted from the action
-      if state.tou_peak == 1:
-
-          if is_charge_action:
-              
-              monetary_saving = ( (1.0 - (state.solar_ctlr_setpoint / 100.0)) * (bess_step_energy * solar_ppa_tariff) + (state.solar_ctlr_setpoint / 100.0) * (bess_step_energy * tou_peak_tariff) ) / 1000.0
-
-          elif is_discharge_action:
-
-              monetary_saving = (bess_step_energy * tou_peak_tariff) / 1000.0
-              
-      elif state.tou_standard == 1:
-
-          if is_charge_action:
-              
-              monetary_saving = ( (1.0 - (state.solar_ctlr_setpoint / 100.0)) * (bess_step_energy * solar_ppa_tariff) + (state.solar_ctlr_setpoint / 100.0) * (bess_step_energy * tou_standard_tariff) ) / 1000.0
-
-          elif is_discharge_action:
-
-              monetary_saving = (bess_step_energy * tou_standard_tariff) / 1000.0
-          
-      elif state.tou_offpeak == 1:
-
-          if is_charge_action:
-              
-              monetary_saving = ( (1.0 - (state.solar_ctlr_setpoint / 100.0)) * (bess_step_energy * solar_ppa_tariff) + (state.solar_ctlr_setpoint / 100.0) * (bess_step_energy * tou_offpeak_tariff) ) / 1000.0
-
-          elif is_discharge_action:
-
-              monetary_saving = (bess_step_energy * tou_offpeak_tariff) / 1000.0
-
-      self.reward = (self.discount_factor * self.reward) + monetary_saving
+          self.reward = 0.0
 
       return self.reward
 
