@@ -37,12 +37,12 @@ class EnvState:
 
 class MicrogridEnv:
 
-  def __init__(self, data: pd.DataFrame):
+  def __init__(self, data: pd.DataFrame, debug_flag: bool):
       self.env_data = data
+      self.debug_flag = debug_flag
       self.state = None
-      self.step_idx = 0
+      self.state_idx = 0
       self.reward = 0.0
-      self.discount_factor = 0.99
       self.grid_notified_maximum_demand = 2000.0
       self.bess_capacity = 3000.0
       self.bess_avail_discharge_energy = self.bess_capacity
@@ -57,46 +57,57 @@ class MicrogridEnv:
 
   def display_data_info(self):
 
-      print("Environment Defaults: ")
-      print(f"""
-      Grid Notified Maximum Demand: {self.grid_notified_maximum_demand} kVA
-      BESS Capacity: {self.bess_capacity} kWh
-      BESS Actions: {', '.join( list( self.action_space.values() ) )}
-      Reward Discount Factor: {self.discount_factor}
-      """)
-      
-      print("\nData Summary: ")
-      print(self.env_data.info())
-      print("\n")
+      if self.debug_flag:
+
+          print("Environment Defaults: ")
+          print(f"""
+          Grid Notified Maximum Demand: {self.grid_notified_maximum_demand} kVA
+          BESS Capacity: {self.bess_capacity} kWh
+          BESS Actions: {', '.join( list( self.action_space.values() ) )}
+          """)
+
+          print("\nData Summary: ")
+          print(self.env_data.info())
+          print("\n")
 
   def get_new_state(self) -> EnvState:
 
-      obs = self.env_data.iloc[self.step_idx, : ]
+      obs = self.env_data.iloc[self.state_idx, : ]
 
       self.state = EnvState(**obs)
+
+      if self.debug_flag:
       
-      print(f"""
-      [{self.step_idx}] Environment State ->
-              hour_sin: {self.state.ts_hour_sin: .4f}
-              hour_cos: {self.state.ts_hour_cos: .4f}
-              tou_offpeak: {self.state.tou_offpeak: .0f}
-              tou_standard: {self.state.tou_standard: .0f}
-              tou_peak: {self.state.tou_peak: .0f}
-              day_week: {self.state.day_week: .0f}
-              day_saturday: {self.state.day_saturday: .0f}
-              day_sunday: {self.state.day_sunday: .0f}
-              site_load_energy: {self.state.site_load_energy: .2f} (kWh)
-              solar_prod_energy: {self.state.solar_prod_energy: .2f} (kWh)
-              solar_ctlr_setpoint: {self.state.solar_ctlr_setpoint: .2f} (%)
-              solar_vs_load_ratio: {self.state.get_solar_vs_load_ratio(): .2f} (%)
-              grid_import_energy: {self.state.grid_import_energy: .2f} (kWh)
-              bess_avail_discharge_energy: {self.bess_avail_discharge_energy: .2f} (kWh)
-              done: {self.done}
-      """)
+          print(f"""
+          [{self.state_idx}] Environment State ->
+                  hour_sin: {self.state.ts_hour_sin: .4f}
+                  hour_cos: {self.state.ts_hour_cos: .4f}
+                  tou_offpeak: {self.state.tou_offpeak: .0f}
+                  tou_standard: {self.state.tou_standard: .0f}
+                  tou_peak: {self.state.tou_peak: .0f}
+                  day_week: {self.state.day_week: .0f}
+                  day_saturday: {self.state.day_saturday: .0f}
+                  day_sunday: {self.state.day_sunday: .0f}
+                  site_load_energy: {self.state.site_load_energy: .2f} (kWh)
+                  solar_prod_energy: {self.state.solar_prod_energy: .2f} (kWh)
+                  solar_ctlr_setpoint: {self.state.solar_ctlr_setpoint: .2f} (%)
+                  solar_vs_load_ratio: {self.state.get_solar_vs_load_ratio(): .2f} (%)
+                  grid_import_energy: {self.state.grid_import_energy: .2f} (kWh)
+                  bess_avail_discharge_energy: {self.bess_avail_discharge_energy: .2f} (kWh)
+                  done: {self.done}
+          """)
       
       return self.state
 
-  def rule_based_policy(self, state: EnvState):
+  def get_number_of_actions(self):
+
+      return len(self.action_space)
+
+  def sample_action(self):
+
+      return np.random.choice( self.get_number_of_actions() )
+
+  def rule_based_policy(self):
 
       # Action space indices
       charge_1500_idx = 0
@@ -108,6 +119,7 @@ class MicrogridEnv:
       discharge_1500_idx = 6
 
       action_idx = None
+      state = self.state
 
       if state.tou_peak == 1:
           # Discharge when it's TOU Peak
@@ -182,19 +194,19 @@ class MicrogridEnv:
 
       # Calculate the total cost for charging from solar and grid energy sources
       charge_from_grid_cost = 0.0
-      charge_from_solar_cost = final_charge_from_solar_energy * self.solar_ppa_tariff
+      charge_from_solar_cost = final_charge_from_solar_energy * ( -1 * self.solar_ppa_tariff + (self.tou_offpeak_tariff + self.tou_standard_tariff + self.tou_peak_tariff) / 3.0 )
 
       if state.tou_peak == 1:
           
-          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_peak_tariff
+          charge_from_grid_cost = final_charge_from_grid_import_energy * ( -1 * self.tou_peak_tariff + (self.tou_offpeak_tariff + self.tou_standard_tariff) / 2.0 )
 
       elif state.tou_standard == 1:
           
-          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_standard_tariff
+          charge_from_grid_cost = final_charge_from_grid_import_energy * ( -1 * self.tou_standard_tariff + (self.tou_offpeak_tariff + self.tou_peak_tariff) / 2.0 )
           
       elif state.tou_offpeak == 1:
           
-          charge_from_grid_cost = final_charge_from_grid_import_energy * self.tou_offpeak_tariff
+          charge_from_grid_cost = final_charge_from_grid_import_energy * ( -1 * self.tou_offpeak_tariff + (self.tou_standard_tariff + self.tou_peak_tariff) / 2.0 )
 
       return (charge_from_solar_cost + charge_from_grid_cost) / 1000.0
 
@@ -235,15 +247,15 @@ class MicrogridEnv:
       
       if state.tou_peak == 1:
           
-          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_peak_tariff
+          discharge_into_load_cost_saving = final_discharge_step_size * ( self.tou_peak_tariff - (self.tou_offpeak_tariff + self.tou_standard_tariff) / 2 )
 
       elif state.tou_standard == 1:
           
-          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_standard_tariff
+          discharge_into_load_cost_saving = final_discharge_step_size * ( self.tou_standard_tariff - (self.tou_offpeak_tariff + self.tou_peak_tariff) / 2 )
           
       elif state.tou_offpeak == 1:
           
-          discharge_into_load_cost_saving = final_discharge_step_size * self.tou_offpeak_tariff
+          discharge_into_load_cost_saving = final_discharge_step_size * ( self.tou_offpeak_tariff - (self.tou_standard_tariff + self.tou_peak_tariff) / 2 )
 
       return discharge_into_load_cost_saving / 1000.0
 
@@ -256,12 +268,10 @@ class MicrogridEnv:
       # Apply the selected charge/discharge action to battery storage
       if is_charge_action: 
 
-          # Reward is negative, because charging the battery is a cost
-          self.reward = -1 * self.bess_charge_step(state=self.state, action=action)
+          self.reward = self.bess_charge_step(state=self.state, action=action)
 
       elif is_discharge_action:
 
-          # Reward is positive, because discharging the battery is a saving
           self.reward = self.bess_discharge_step(state=self.state, action=action)
 
       else: # do-nothing
@@ -274,9 +284,9 @@ class MicrogridEnv:
 
       nr_records = self.env_data.shape[0]
 
-      self.done = (self.step_idx + 1) > (nr_records - 1)
+      self.done = (self.state_idx + 1) > (nr_records - 1)
 
-      if self.done:
+      if self.done and self.debug_flag:
           
           print("Episode terminal state reached !")
 
@@ -286,30 +296,34 @@ class MicrogridEnv:
 
       bess_action = self.action_space.get(action, None)
 
-      print(f""" 
-      [{self.step_idx}] Selected Action -> {self.action_space.get(action, None)}
-      """)
+      if self.debug_flag:
+
+          print(f""" 
+          [{self.state_idx}] Selected Action -> {self.action_space.get(action, None)}
+          """)
 
       reward = self.calculate_reward(state=self.state, action=action)
 
-      print(f""" 
-      [{self.step_idx}] Reward -> {reward: .3f}
-      """)
+      if self.debug_flag:
+
+          print(f""" 
+          [{self.state_idx}] Reward -> {reward: .3f}
+          """)
 
       if self.terminal_state():
           return None, self.reward, self.done
 
-      self.step_idx += 1   
+      self.state_idx += 1   
       state = self.get_new_state()
       
-      return state, self.reward, self.done
+      return self.state_idx, self.reward, self.done
       
   def reset(self):
       
       self.reward = 0.0
-      self.step_idx = 0
+      self.state_idx = 0
       self.bess_avail_discharge_energy = self.bess_capacity
       self.done = False
       state = self.get_new_state()
       
-      return state, self.reward, self.done
+      return self.state_idx, self.reward, self.done
