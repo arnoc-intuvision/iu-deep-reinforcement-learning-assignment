@@ -4,7 +4,7 @@ from collections import defaultdict
 from microgrid_env import MicrogridEnv
 
 GAMMA = 0.99 # Discounting Factor
-ALPHA = 0.07 # Learning Rate
+ALPHA = 0.3 # Learning Rate
 EPSILON = 0.7 # e-greedy strategy / probability of taking a random action
 
 State = int
@@ -79,8 +79,8 @@ class QLearningAgent:
         new_val = reward + GAMMA * best_val
 
         # Update the q-value function (Bellman Update)
-        self.values[(state, action)] = old_val + ALPHA * (new_val - old_val)
-        # self.values[(state, action)] = (1 - ALPHA) * old_val + ALPHA * new_val
+        # self.values[(state, action)] = old_val + ALPHA * (new_val - old_val)
+        self.values[(state, action)] = (1 - ALPHA) * old_val + ALPHA * new_val
 
     
     def run_test_episode(self, env: MicrogridEnv) -> float:
