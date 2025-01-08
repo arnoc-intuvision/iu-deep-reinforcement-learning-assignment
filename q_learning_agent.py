@@ -1,12 +1,9 @@
 import numpy as np
 import pandas as pd
 import typing as tt
+from dataclasses import asdict
 from collections import defaultdict
 from microgrid_env import MicrogridEnv
-
-GAMMA = 0.99 # Discounting Factor
-ALPHA = 0.1 # Learning Rate
-EPSILON = 0.75 # e-greedy strategy / probability of taking a random action
 
 State = int
 Action = int
@@ -14,46 +11,17 @@ ValuesKey = tt.Tuple[State, Action]
 
 class QLearningAgent:
     
-    def __init__(self, env: MicrogridEnv, epsilon_start: float, epsilon_end: float, decay_steps: int):
+    def __init__(self, env: MicrogridEnv, discounting_factor: float, learning_rate: float, epsilon_start: float, epsilon_end: float, decay_steps: int):
         self.env = env
         self.step = 0
+        self.discounting_factor = discounting_factor
+        self.learning_rate = learning_rate
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
         self.decay_steps = decay_steps
         self.action_space = {0: 'charge-1500', 1: 'charge-1000', 2: 'charge-500', 3: 'do-nothing', 4: 'discharge-500', 5: 'discharge-1000', 6: 'discharge-1500'}
-        self.state, _, self.reward, self.done = self.env.reset()
+        self.state, self.reward, self.done = self.env.reset()
         self.values: tt.Dict[ValuesKey] = defaultdict(float)
-
-    
-    def display_action_value_table(self):
-
-        nr_states = 168
-        nr_actions = 7
-        action_space = {0: 'charge-1500', 1: 'charge-1000', 2: 'charge-500', 3: 'do-nothing', 4: 'discharge-500', 5: 'discharge-1000', 6: 'discharge-1500'}
-
-        for s in range(nr_states):
-
-            charge1500    = self.values[(s, 0)]
-            charge1000    = self.values[(s, 1)]
-            charge500     = self.values[(s, 2)]
-            do_nothing    = self.values[(s, 3)]
-            discharge500  = self.values[(s, 4)]
-            discharge1000 = self.values[(s, 5)]
-            discharge1500 = self.values[(s, 6)]
-
-            best_value, best_action = self.best_value_and_action(state=s)
-            best_action_name = self.action_space[best_action]
-            
-            print(f"""
-            State: {s}, 
-            Action Values -> 
-               [0] charge-1500: {charge1500: .2f} vs [6] discharge-1500: {discharge1500: .2f}
-               [1] charge-1000: {charge1000: .2f} vs [5] discharge-1000: {discharge1000: .2f}
-               [2] charge-500:  {charge500: .2f} vs [4] discharge-500:  {discharge500: .2f}
-               [3] do-nothing:  {do_nothing: .2f}
-
-               *[{best_action}] {best_action_name}: {best_value: .2f}
-            """)
 
     
     def anneal_epsilon(self):
@@ -83,7 +51,7 @@ class QLearningAgent:
             if np.random.random() > self.epsilon:
     
                 # Select best action from the q-value function for the current state
-                _, action = self.best_value_and_action(state=self.state)
+                _, action = self.best_value_and_action(state=self.state.index)
     
             else: 
     
@@ -93,15 +61,13 @@ class QLearningAgent:
         old_state = self.state
 
         # Execute the action against the environment
-        new_state, state_obj, reward, done = self.env.step(action=action)
-        # step_obj = self.env.step(action=action)
-        # print(step_obj)
+        new_state, reward, done = self.env.step(action=action)
 
         # Check for terminal state
         if done:
 
             # Reset the environment
-            self.state, state_obj, self.reward, self.done = self.env.reset()
+            self.state, self.reward, self.done = self.env.reset()
 
         else:
 
@@ -134,11 +100,12 @@ class QLearningAgent:
         # Get the highest/best q-value for the next state 
         best_val, _ = self.best_value_and_action(next_state)
 
-        new_val = reward + GAMMA * best_val
+        new_val = reward + self.discounting_factor * best_val
 
-        # Update the q-value function (Bellman Update)
-        self.values[(state, action)] = old_val + ALPHA * (new_val - old_val)
-        # self.values[(state, action)] = (1 - ALPHA) * old_val + ALPHA * new_val
+        # Bellman q-value function update
+        self.values[(state, action)] = (1 - self.learning_rate) * old_val + self.learning_rate * new_val
+
+        # self.values[(state, action)] = old_val + self.learning_rate * (new_val - old_val)
 
     
     def run_test_episode(self, env: MicrogridEnv):
@@ -146,15 +113,15 @@ class QLearningAgent:
         total_episode_reward = 0.0
         experience_history = []
 
-        state, state_obj, reward, done = env.reset()
+        state, reward, done = env.reset()
 
         while True:
 
-            _, action = self.best_value_and_action(state)
+            _, action = self.best_value_and_action(state.index)
 
-            experience_history.append( (state_obj, action, reward) )
+            new_state, reward, done = env.step(action=action)
 
-            new_state, state_obj, reward, done = env.step(action=action)
+            experience_history.append( (state, action, reward) )
 
             total_episode_reward += reward
 
@@ -168,26 +135,57 @@ class QLearningAgent:
 
         return total_episode_reward, experience_history
 
+
+    def display_action_value_table(self):
+
+        nr_states = 168
+        nr_actions = 7
+        action_space = {0: 'charge-1500', 1: 'charge-1000', 2: 'charge-500', 3: 'do-nothing', 4: 'discharge-500', 5: 'discharge-1000', 6: 'discharge-1500'}
+
+        print("\nAction Value Table: ")
+
+        for s in range(nr_states):
+
+            charge1500    = self.values[(s, 0)]
+            charge1000    = self.values[(s, 1)]
+            charge500     = self.values[(s, 2)]
+            do_nothing    = self.values[(s, 3)]
+            discharge500  = self.values[(s, 4)]
+            discharge1000 = self.values[(s, 5)]
+            discharge1500 = self.values[(s, 6)]
+
+            best_value, best_action = self.best_value_and_action(state=s)
+            best_action_name = self.action_space[best_action]
+            
+            print(f"""
+            State: {s}, 
+            Action Values -> 
+               [0] charge-1500: {charge1500: .2f} vs [6] discharge-1500: {discharge1500: .2f}
+               [1] charge-1000: {charge1000: .2f} vs [5] discharge-1000: {discharge1000: .2f}
+               [2] charge-500:  {charge500: .2f} vs [4] discharge-500:  {discharge500: .2f}
+               [3] do-nothing:  {do_nothing: .2f}
+
+               *[{best_action}] {best_action_name}: {best_value: .2f}
+            """)
+
     
-    def display_agent_learned_policy(self, env: MicrogridEnv):
+    def save_learned_policy(self, env: MicrogridEnv):
 
         total_episode_reward, experience_history = self.run_test_episode(env=env)
 
         experience_hist_with_extra_info = []
 
-        for state_obj, action, reward in experience_history:
-
-            state_obj['action'] = action
-            state_obj['reward'] = reward
-            experience_hist_with_extra_info.append(state_obj)
+        for state, action, reward in experience_history:
+            
+            experience_hist_with_extra_info.append( asdict(state) )
 
         df = pd.DataFrame(data=experience_hist_with_extra_info)
 
-        print(f"Total Episode Reward: {total_episode_reward: .2f}")
+        print(f"\nTotal Episode Reward: {total_episode_reward: .2f}")
 
-        print(df)
+        print("\nSave agent's learned policy.\n")
 
-
+        df.to_csv('agent_learned_policy.csv', header=True, index=True)
 
 
             

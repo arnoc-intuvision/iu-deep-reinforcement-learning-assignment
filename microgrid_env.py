@@ -3,7 +3,7 @@ import traceback
 import logging as log
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 np.random.seed(2025)
 
@@ -39,6 +39,7 @@ class EnvState:
     solar_vs_load_ratio: float = field(init=False)
     bess_soc: float = field(init=False)
     action_name: str = field(init=False)
+    reward_earned: float = field(init=False)
 
     def __post_init__(self):
 
@@ -293,6 +294,8 @@ class EnvState:
             reward = (
                       + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20% and it did nothing to improve the soc
                      )
+
+        self.reward_earned = reward
 
         if self.debug_flag:
 
