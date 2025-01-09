@@ -205,19 +205,6 @@ class EnvState:
         return future_charge_cost
 
     
-    def calculate_bess_soc_penalty(self) -> float:
-
-        bess_soc_penalty = ( (100.0 - self.bess_soc) / 100.0 ) * 1000.0
-
-        if self.debug_flag:
-
-            print(f"""
-            [{self.index}] Low BESS SoC Penalty: {bess_soc_penalty: .2f}
-            """)
-
-        return np.round(bess_soc_penalty, 2)
-
-    
     def calculate_without_bess_cost(self) -> float:
 
         grid_cost = 0.0
@@ -254,13 +241,20 @@ class EnvState:
         action_is_do_nothing = re.match(r"^do-nothing.*", self.action_name) is not None
         action_is_charge = re.match(r"^charge.*", self.action_name) is not None
 
-        if self.bess_soc >= 80.0:
+        charged_soc_ratio = self.bess_soc / 100.0
+        discharged_soc_ratio = (100.0 - self.bess_soc) / 100.0
+            
+        if (action_is_charge is True) and (self.bess_soc >= 90.0):
+            
+            bess_soc_reward = -1 * charged_soc_ratio * 1000.0
 
-            bess_soc_reward = (self.bess_soc / 100.0) * 1000.0
+        elif self.bess_soc >= 80.0:
+
+            bess_soc_reward = charged_soc_ratio * 1000.0
 
         elif self.bess_soc < 20.0:
             
-            bess_soc_reward = -1 * ( (100.0 - self.bess_soc) / 100.0 ) * 1000.0
+            bess_soc_reward = -1 * discharged_soc_ratio * 1000.0
 
         if self.debug_flag:
 
